@@ -50,15 +50,30 @@ func started(name string, snapshot tailscale.Snapshot) fakeOutbound {
 }
 
 func withAdapters(t *testing.T, adapters map[string]any) {
+	entries := []adapterEntry{}
+	for name, adapter := range adapters {
+		entries = append(entries, adapterEntry{name: name, adapter: adapter})
+	}
+	withEntries(t, entries...)
+}
+
+// withEntries replaces the adapter source with entries yielded in order, like
+// top-level proxies followed by provider members.
+func withEntries(t *testing.T, entries ...adapterEntry) {
 	previous := adapterSource
-	adapterSource = func(yield func(string, any) bool) {
-		for name, adapter := range adapters {
-			if !yield(name, adapter) {
+	adapterSource = func(yield func(adapterEntry) bool) {
+		for _, entry := range entries {
+			if !yield(entry) {
 				return
 			}
 		}
 	}
 	t.Cleanup(func() { adapterSource = previous })
+}
+
+func withConfig(outbound fakeOutbound, config tailscale.Config) fakeOutbound {
+	outbound.controller.Config = config
+	return outbound
 }
 
 func newRouter(secret bool) http.Handler {
@@ -145,5 +160,105 @@ func TestLoginAndLogout(t *testing.T) {
 	_, body, _ := do(t, h, http.MethodGet, Path+"/status?name=ts")
 	if !strings.Contains(body, `"state":"NeedsLogin"`) {
 		t.Fatalf("after logout %s", body)
+	}
+}
+
+func listOutbounds(t *testing.T) (listResponse, string) {
+	t.Helper()
+	code, body, _ := do(t, newRouter(true), http.MethodGet, Path)
+	if code != http.StatusOK {
+		t.Fatalf("%d %s", code, body)
+	}
+	var list listResponse
+	if err := json.Unmarshal([]byte(body), &list); err != nil {
+		t.Fatal(err)
+	}
+	return list, body
+}
+
+func TestStatusesIncludeProviderMembersWithConfig(t *testing.T) {
+	local := withConfig(started("local", tailscale.Snapshot{BackendState: "Running"}),
+		tailscale.Config{Hostname: "phone", StateDir: "/data/home/ts-local"})
+	remote := withConfig(started("remote", tailscale.Snapshot{BackendState: "NeedsLogin"}),
+		tailscale.Config{StateDir: "/data/home/tailscale", StateDirDefault: true, HasAuthKey: true, ControlURLHost: "control.example.test"})
+	withEntries(t,
+		adapterEntry{name: "local", adapter: local},
+		adapterEntry{name: "remote", provider: "subscription", adapter: remote},
+	)
+	list, body := listOutbounds(t)
+	if len(list.Outbounds) != 2 {
+		t.Fatalf("%s", body)
+	}
+	got := list.Outbounds[1]
+	if got.Name != "remote" || got.Provider != "subscription" || got.Config == nil ||
+		!got.Config.StateDirDefault || !got.Config.HasAuthKey || got.Config.ControlURLHost != "control.example.test" {
+		t.Fatalf("provider member %+v", got)
+	}
+	if first := list.Outbounds[0]; first.Provider != "" || first.Config == nil || first.Config.Hostname != "phone" ||
+		first.Config.StateDir != "/data/home/ts-local" {
+		t.Fatalf("top-level %+v", first)
+	}
+	if strings.Contains(body, "tskey") || strings.Contains(body, "https://") {
+		t.Fatalf("status leaks secrets: %s", body)
+	}
+}
+
+func TestStatusesReportOneAdapterOnce(t *testing.T) {
+	// Mihomo's implicit "default" provider wraps the same top-level proxies.
+	ts := started("ts", tailscale.Snapshot{BackendState: "Running"})
+	withEntries(t,
+		adapterEntry{name: "ts", adapter: ts},
+		adapterEntry{name: "ts", provider: "default", adapter: ts},
+	)
+	list, body := listOutbounds(t)
+	if len(list.Outbounds) != 1 || list.Outbounds[0].Provider != "" {
+		t.Fatalf("%s", body)
+	}
+}
+
+func TestStatusesKeepSameNameFromDifferentProviders(t *testing.T) {
+	withEntries(t,
+		adapterEntry{name: "ts", provider: "b", adapter: started("ts", tailscale.Snapshot{BackendState: "Running"})},
+		adapterEntry{name: "ts", provider: "a", adapter: started("ts", tailscale.Snapshot{BackendState: "NeedsLogin"})},
+	)
+	list, body := listOutbounds(t)
+	if len(list.Outbounds) != 2 || list.Outbounds[0].Provider != "a" || list.Outbounds[1].Provider != "b" ||
+		list.Outbounds[0].State != tailscale.StateNeedsLogin {
+		t.Fatalf("%s", body)
+	}
+}
+
+func TestLookupSelectsProvider(t *testing.T) {
+	withEntries(t,
+		adapterEntry{name: "ts", provider: "a", adapter: started("ts", tailscale.Snapshot{BackendState: "Running"})},
+		adapterEntry{name: "ts", provider: "b", adapter: started("ts", tailscale.Snapshot{BackendState: "NeedsLogin"})},
+		adapterEntry{name: "solo", provider: "a", adapter: started("solo", tailscale.Snapshot{BackendState: "Running"})},
+	)
+	h := newRouter(true)
+	if _, body, _ := do(t, h, http.MethodGet, Path+"/status?name=ts&provider=b"); !strings.Contains(body, `"state":"NeedsLogin"`) ||
+		!strings.Contains(body, `"provider":"b"`) {
+		t.Fatalf("provider b: %s", body)
+	}
+	if code, body, _ := do(t, h, http.MethodGet, Path+"/status?name=ts"); code != http.StatusConflict {
+		t.Fatalf("ambiguous name without provider: %d %s", code, body)
+	}
+	if code, body, _ := do(t, h, http.MethodGet, Path+"/status?name=solo"); code != http.StatusOK || !strings.Contains(body, `"provider":"a"`) {
+		t.Fatalf("unique provider member without provider: %d %s", code, body)
+	}
+	if code, _, _ := do(t, h, http.MethodGet, Path+"/status?name=ts&provider=c"); code != http.StatusNotFound {
+		t.Fatalf("unknown provider: %d", code)
+	}
+	if _, err := Lookup("ts", "a"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLookupPrefersTopLevelOutbound(t *testing.T) {
+	withEntries(t,
+		adapterEntry{name: "ts", adapter: started("ts", tailscale.Snapshot{BackendState: "Running"})},
+		adapterEntry{name: "ts", provider: "a", adapter: started("ts", tailscale.Snapshot{BackendState: "NeedsLogin"})},
+	)
+	if _, body, _ := do(t, newRouter(true), http.MethodGet, Path+"/status?name=ts"); !strings.Contains(body, `"state":"Running"`) {
+		t.Fatalf("%s", body)
 	}
 }

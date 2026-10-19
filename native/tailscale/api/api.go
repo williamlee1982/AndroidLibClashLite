@@ -7,6 +7,10 @@
 //	GET  /asterisk/tailscale/login-url?name=...  pending login URL (secret required)
 //	POST /asterisk/tailscale/logout?name=<name>  deauthorize this node
 //
+// Every route but the list takes an optional provider=<provider> to select a
+// proxy-provider member; without it the top-level outbound, or the only
+// provider member with that name, is used.
+//
 // Status never carries a login URL. login-url is refused on listeners without
 // a controller secret and is sent with Cache-Control: no-store.
 package api
@@ -54,13 +58,13 @@ func listStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func getStatus(w http.ResponseWriter, r *http.Request) {
-	controller, ok := lookup(w, r)
+	found, ok := lookupEntry(w, r)
 	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
 	defer cancel()
-	render.JSON(w, r, controller.Status(ctx))
+	render.JSON(w, r, statusOf(ctx, found))
 }
 
 func login(w http.ResponseWriter, r *http.Request) {
@@ -109,18 +113,23 @@ func logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func lookup(w http.ResponseWriter, r *http.Request) (*tailscale.Controller, bool) {
+	found, ok := lookupEntry(w, r)
+	return found.controller, ok
+}
+
+func lookupEntry(w http.ResponseWriter, r *http.Request) (outbound, bool) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
 		render.Status(r, http.StatusBadRequest)
 		render.JSON(w, r, route.ErrBadRequest)
-		return nil, false
+		return outbound{}, false
 	}
-	controller, err := Lookup(name)
+	found, err := lookupOutbound(name, r.URL.Query().Get("provider"))
 	if err != nil {
 		writeError(w, r, err)
-		return nil, false
+		return outbound{}, false
 	}
-	return controller, true
+	return found, true
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
@@ -128,7 +137,7 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, tailscale.ErrNotStarted), errors.Is(err, tailscale.ErrClosed),
+	case errors.Is(err, ErrAmbiguous), errors.Is(err, tailscale.ErrNotStarted), errors.Is(err, tailscale.ErrClosed),
 		errors.Is(err, tailscale.ErrLoginURLUnavailable):
 		status = http.StatusConflict
 	case errors.Is(err, tailscale.ErrInvalidLoginURL):
