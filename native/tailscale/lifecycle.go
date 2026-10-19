@@ -29,12 +29,34 @@ type Lifecycle struct {
 	phase         Phase
 	serverStarted bool
 	err           error
+	loginErr      error
+	loginAttempt  uint64
 }
 
 type LifecycleSnapshot struct {
 	Phase         Phase
 	ServerStarted bool
 	Err           error
+	// LoginErr is the failure of the last asynchronous login request, if any.
+	LoginErr error
+}
+
+// LoginStarted clears the previous login failure and returns the attempt id.
+func (l *Lifecycle) LoginStarted() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.loginAttempt++
+	l.loginErr = nil
+	return l.loginAttempt
+}
+
+// LoginResult records the outcome of login attempt id; stale attempts are ignored.
+func (l *Lifecycle) LoginResult(attempt uint64, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if attempt == l.loginAttempt {
+		l.loginErr = err
+	}
 }
 
 func (l *Lifecycle) Starting() {
@@ -77,5 +99,5 @@ func (l *Lifecycle) Closed() {
 func (l *Lifecycle) Snapshot() LifecycleSnapshot {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return LifecycleSnapshot{Phase: l.phase, ServerStarted: l.serverStarted, Err: l.err}
+	return LifecycleSnapshot{Phase: l.phase, ServerStarted: l.serverStarted, Err: l.err, LoginErr: l.loginErr}
 }

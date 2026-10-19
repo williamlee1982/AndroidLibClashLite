@@ -120,6 +120,7 @@ type fakeBackend struct {
 	mu       sync.Mutex
 	life     *Lifecycle
 	startErr error
+	loginErr error
 	snapshot Snapshot
 	queryErr error
 	logins   int
@@ -149,6 +150,9 @@ func (f *fakeBackend) LoginInteractive(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logins++
+	if f.loginErr != nil {
+		return f.loginErr
+	}
 	f.snapshot.AuthURL = fixtureLoginURL
 	return nil
 }
@@ -239,6 +243,73 @@ func TestControllerRunningAndErrors(t *testing.T) {
 	}
 	if err := c.Login(context.Background()); !errors.Is(err, ErrClosed) {
 		t.Fatalf("login after close: %v", err)
+	}
+}
+
+func waitForState(t *testing.T, c *Controller, want State) Status {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := c.Status(context.Background())
+		if got.State == want {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("state %s, want %s: %+v", got.State, want, got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestControllerReportsAsyncLoginFailure(t *testing.T) {
+	c, backend := newController()
+	backend.loginErr = errors.New("control refused: " + fixtureLoginURL)
+	if err := c.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := waitForState(t, c, StateError)
+	if got.Error == "" || strings.Contains(got.Error, "0123456789abcdef") {
+		t.Fatalf("login failure must be reported redacted: %+v", got)
+	}
+
+	// A new attempt clears the previous failure.
+	backend.mu.Lock()
+	backend.loginErr = nil
+	backend.mu.Unlock()
+	if err := c.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for got := c.Status(context.Background()); !got.LoginURLAvailable; got = c.Status(context.Background()) {
+		if got.State == StateError || time.Now().After(deadline) {
+			t.Fatalf("retry: %+v", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestLifecycleIgnoresStaleLoginResults(t *testing.T) {
+	var life Lifecycle
+	first := life.LoginStarted()
+	second := life.LoginStarted()
+	life.LoginResult(first, errors.New("stale"))
+	if got := life.Snapshot().LoginErr; got != nil {
+		t.Fatalf("stale result applied: %v", got)
+	}
+	life.LoginResult(second, errors.New("current"))
+	if got := life.Snapshot().LoginErr; got == nil || got.Error() != "current" {
+		t.Fatalf("current result: %v", got)
+	}
+}
+
+func TestControllerReportsAsyncStartFailure(t *testing.T) {
+	c, backend := newController()
+	backend.startErr = errors.New("listen failed")
+	if err := c.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitForState(t, c, StateError); !strings.Contains(got.Error, "listen failed") {
+		t.Fatalf("%+v", got)
 	}
 }
 

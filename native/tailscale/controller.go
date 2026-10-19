@@ -55,6 +55,11 @@ func (c *Controller) Status(ctx context.Context) Status {
 		return ErrorStatus(c.Name, err)
 	}
 	status := FromSnapshot(c.Name, snapshot)
+	if life.LoginErr != nil && status.State != StateRunning && status.State != StateNeedsMachineAuth && !status.LoginURLAvailable {
+		failed := ErrorStatus(c.Name, life.LoginErr)
+		failed.TailnetIPs, failed.Hostname = status.TailnetIPs, status.Hostname
+		return failed
+	}
 	if life.Phase == PhaseFailed && status.State != StateRunning && status.State != StateNeedsLogin {
 		failed := ErrorStatus(c.Name, life.Err)
 		failed.TailnetIPs, failed.Hostname = status.TailnetIPs, status.Hostname
@@ -77,10 +82,12 @@ func (c *Controller) Login(ctx context.Context) error {
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
 	}
+	attempt := c.Lifecycle.LoginStarted()
 	go func() {
 		ctx, cancel := context.WithTimeout(background, timeout)
 		defer cancel()
-		_ = c.login(ctx)
+		// Surfaced through Status as a redacted Error until the next Login.
+		c.Lifecycle.LoginResult(attempt, c.login(ctx))
 	}()
 	return nil
 }
