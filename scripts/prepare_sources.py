@@ -105,6 +105,31 @@ def prepare_sources(repo, work, core):
     patch('hub/executor/executor.go', '\ttunnel.OnRunning()\n',
           '\ttunnel.OnRunning()\n\tautoswitch.Apply(cfg.AsteriskAutoSwitch)\n')
     patches['log/log.go'] = (repo / 'overlay/mihomo/log/log.go').read_text(encoding='utf-8')
+    # Typed Tailscale state for the Asterisk API: track the lazy tsnet start
+    # without starting it from status queries, and keep login URLs and keys
+    # out of Mihomo logs. tailscale_status.go is a new file in the package.
+    tailscale = 'adapter/outbound/tailscale.go'
+    patch(tailscale, '\tt.startOnce.Do(func() {\n\t\tif err := t.server.Start(); err != nil {',
+          '\tt.startOnce.Do(func() {\n\t\ttailscaleStarting(t)\n\t\tif err := t.server.Start(); err != nil {')
+    patch(tailscale, '\t\tt.serverStarted = true\n', '\t\tt.serverStarted = true\n\t\ttailscaleServerStarted(t)\n')
+    patch(tailscale, '\t\tgo t.watchBackendState()\n\t})\n\treturn t.startErr\n',
+          '\t\tgo t.watchBackendState()\n\t})\n\ttailscaleStartFinished(t, t.startErr)\n\treturn t.startErr\n')
+    patch(tailscale, 'func (t *Tailscale) Close() error {\n\tt.cancel()\n',
+          'func (t *Tailscale) Close() error {\n\ttailscaleClosed(t)\n\tt.cancel()\n')
+    patch(tailscale, 'log.Infoln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))',
+          'log.Infoln("[Tailscale](%s) %s", option.Name, tailscaleLogLine(format, args...))')
+    patch(tailscale, 'log.Debugln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))',
+          'log.Debugln("[Tailscale](%s) %s", option.Name, tailscaleLogLine(format, args...))')
+    added = {'adapter/outbound/tailscale_status.go':
+             (repo / 'overlay/mihomo/adapter/outbound/tailscale_status.go').read_text(encoding='utf-8')}
+    # Record whether a Clash API listener requires a secret, for routes that
+    # return sensitive data such as the on-demand Tailscale login URL.
+    patch('hub/route/server.go', 'package route\n',
+          'package route\n\nimport tailscaleroute "cfa/native/tailscale"\n')
+    patch('hub/route/server.go',
+          '\t\tif secret != "" {\n\t\t\tr.Use(authentication(secret))\n\t\t}\n',
+          '\t\tif secret != "" {\n\t\t\tr.Use(authentication(secret))\n\t\t}\n'
+          '\t\tr.Use(tailscaleroute.MarkControllerAuth(secret != ""))\n')
 
     # Dependencies enforce ordering before even package-level cached env settings.
     replacements = {}
@@ -123,6 +148,14 @@ def prepare_sources(repo, work, core):
             if count != 1:
                 raise ValueError(f'Cannot insert environment bootstrap: {relative}')
         replacement = work / 'overlay' / relative
+        replacement.parent.mkdir(parents=True, exist_ok=True)
+        replacement.write_text(text, encoding='utf-8')
+        replacements[str(original)] = str(replacement)
+    for name, text in added.items():
+        original = core / name
+        if original.exists():
+            raise ValueError(f'Upstream added {name}; refusing to shadow it')
+        replacement = work / 'overlay' / name
         replacement.parent.mkdir(parents=True, exist_ok=True)
         replacement.write_text(text, encoding='utf-8')
         replacements[str(original)] = str(replacement)
