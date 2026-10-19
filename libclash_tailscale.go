@@ -18,11 +18,15 @@ func QueryTailscaleStatus() string {
 	return marshalJSON(map[string]any{"outbounds": tailscaleapi.Statuses(ctx)})
 }
 
+// The functions below select an outbound by name and proxy provider. An empty
+// provider selects the top-level outbound, or the only provider member with
+// that name; QueryTailscaleStatus reports the provider of every outbound.
+
 // StartTailscaleLogin starts the named tailscale outbound if needed and
 // requests an interactive login. It returns immediately; poll the status
 // until loginUrlAvailable or Running.
-func StartTailscaleLogin(name string) error {
-	controller, err := tailscaleapi.Lookup(name)
+func StartTailscaleLogin(name, provider string) error {
+	controller, err := tailscaleapi.Lookup(name, provider)
 	if err != nil {
 		return err
 	}
@@ -31,8 +35,8 @@ func StartTailscaleLogin(name string) error {
 
 // QueryTailscaleLoginURL returns the pending interactive login URL. Callers
 // must keep it in memory only and never log or persist it.
-func QueryTailscaleLoginURL(name string) (string, error) {
-	controller, err := tailscaleapi.Lookup(name)
+func QueryTailscaleLoginURL(name, provider string) (string, error) {
+	controller, err := tailscaleapi.Lookup(name, provider)
 	if err != nil {
 		return "", err
 	}
@@ -42,8 +46,8 @@ func QueryTailscaleLoginURL(name string) (string, error) {
 }
 
 // LogoutTailscale deauthorizes the node of the named tailscale outbound.
-func LogoutTailscale(name string) error {
-	controller, err := tailscaleapi.Lookup(name)
+func LogoutTailscale(name, provider string) error {
+	controller, err := tailscaleapi.Lookup(name, provider)
 	if err != nil {
 		return err
 	}
