@@ -180,7 +180,7 @@ func TestStatusesIncludeProviderMembersWithConfig(t *testing.T) {
 	local := withConfig(started("local", tailscale.Snapshot{BackendState: "Running"}),
 		tailscale.Config{Hostname: "phone", StateDir: "/data/home/ts-local"})
 	remote := withConfig(started("remote", tailscale.Snapshot{BackendState: "NeedsLogin"}),
-		tailscale.Config{StateDir: "/data/home/tailscale", StateDirDefault: true, HasAuthKey: true, ControlURLHost: "control.example.test"})
+		tailscale.Config{StateDir: "/data/home/tailscale", StateDirDefault: true, HasAuthKey: true, CustomControlURL: true, ControlURLHost: "control.example.test"})
 	withEntries(t,
 		adapterEntry{name: "local", adapter: local},
 		adapterEntry{name: "remote", provider: "subscription", adapter: remote},
@@ -191,7 +191,8 @@ func TestStatusesIncludeProviderMembersWithConfig(t *testing.T) {
 	}
 	got := list.Outbounds[1]
 	if got.Name != "remote" || got.Provider != "subscription" || got.Config == nil ||
-		!got.Config.StateDirDefault || !got.Config.HasAuthKey || got.Config.ControlURLHost != "control.example.test" {
+		!got.Config.StateDirDefault || !got.Config.HasAuthKey || !got.Config.CustomControlURL ||
+		got.Config.ControlURLHost != "control.example.test" {
 		t.Fatalf("provider member %+v", got)
 	}
 	if first := list.Outbounds[0]; first.Provider != "" || first.Config == nil || first.Config.Hostname != "phone" ||

@@ -70,6 +70,7 @@ func tailscaleConfig(option TailscaleOption) tailscalestate.Config {
 		HasAuthKey:      strings.TrimSpace(option.AuthKey) != "",
 	}
 	if control := strings.TrimSpace(option.ControlURL); control != "" {
+		config.CustomControlURL = true
 		if parsed, err := url.Parse(control); err == nil {
 			config.ControlURLHost = strings.ToLower(parsed.Hostname())
 		}

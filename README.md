@@ -192,7 +192,7 @@ providers and override scripts are included and follow provider refreshes.
 is reported once even when Mihomo's implicit `default` provider wraps it.
 `config` is the non-secret effective configuration: `{"hostname","stateDir"
 (resolved absolute path),"stateDirDefault","ephemeral","hasAuthKey",
-"controlUrlHost"}`; the auth key and the full control URL are never reported.
+"customControlUrl","controlUrlHost"}`; the auth key and the full control URL are never reported.
 
 Every route but the list accepts `provider=P`. Without it, the top-level
 outbound named `N` is used, or the only provider member with that name; a name

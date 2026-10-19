@@ -55,10 +55,13 @@ type Config struct {
 	// StateDir is the resolved absolute tsnet state directory.
 	StateDir string `json:"stateDir,omitempty"`
 	// StateDirDefault reports that StateDir is Mihomo's implicit default.
-	StateDirDefault bool   `json:"stateDirDefault"`
-	Ephemeral       bool   `json:"ephemeral"`
-	HasAuthKey      bool   `json:"hasAuthKey"`
-	ControlURLHost  string `json:"controlUrlHost,omitempty"`
+	StateDirDefault bool `json:"stateDirDefault"`
+	Ephemeral       bool `json:"ephemeral"`
+	HasAuthKey      bool `json:"hasAuthKey"`
+	// CustomControlURL reports a control-url option; ControlURLHost is its
+	// host, empty when the URL does not parse.
+	CustomControlURL bool   `json:"customControlUrl"`
+	ControlURLHost   string `json:"controlUrlHost,omitempty"`
 }
 
 // Snapshot is the subset of ipnstate.Status the mapping needs.
