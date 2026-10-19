@@ -88,6 +88,9 @@ and coroutine adapters. The old CMFA `Clash`/`Bridge` classes are not included.
 
 - `queryAutoSwitch()` and `patchAutoSwitch(settingsJSON)` mirror the
   [auto-switch](#auto-switch) Clash API endpoint for the embedded runtime.
+- `queryTailscaleStatus()`, `startTailscaleLogin(name, provider)`,
+  `queryTailscaleLoginURL(name, provider)` and `logoutTailscale(name, provider)` mirror the
+  [Tailscale](#tailscale-state) Clash API endpoints for the embedded runtime.
 
 The exported surface covers META's current configuration, subscription, TUN,
 logging, traffic, proxy/provider, Android platform notifications and AGE
@@ -166,6 +169,45 @@ The value survives hot profile reloads (`PUT /configs` or JNI load) and lasts
 until the process exits or JNI `reset()`; the YAML value applies again only in a
 new session. Each apply restarts failure counting. Invalid filters, status
 ranges, or an enabled value without groups return 400.
+
+## Tailscale state
+
+Mihomo `tailscale` outbounds report typed tsnet state without log scraping.
+Routes are registered in the authenticated Clash API group for both the CLI and
+JNI cores:
+
+| Route | Result |
+| --- | --- |
+| `GET /asterisk/tailscale` | `{"outbounds":[Status...]}` for every tailscale outbound, including provider members |
+| `GET /asterisk/tailscale/status?name=N[&provider=P]` | one `Status` |
+| `POST /asterisk/tailscale/login?name=N` | `202`; starts tsnet if needed and requests an interactive login |
+| `GET /asterisk/tailscale/login-url?name=N` | `{"url":"https://..."}` while a login is pending; `Cache-Control: no-store` |
+| `POST /asterisk/tailscale/logout?name=N` | `204`; deauthorizes this node |
+
+`Status` is `{"name","state","loginUrlAvailable","tailnetIps","hostname",
+"dnsName","magicDnsSuffix","health","error","provider","config"}`. The list
+reports the running core's effective outbounds, so outbounds from proxy
+providers and override scripts are included and follow provider refreshes.
+`provider` names the proxy provider (empty for top-level proxies); one adapter
+is reported once even when Mihomo's implicit `default` provider wraps it.
+`config` is the non-secret effective configuration: `{"hostname","stateDir"
+(resolved absolute path),"stateDirDefault","ephemeral","hasAuthKey",
+"customControlUrl","controlUrlHost"}`; the auth key and the full control URL are never reported.
+
+Every route but the list accepts `provider=P`. Without it, the top-level
+outbound named `N` is used, or the only provider member with that name; a name
+supplied by several providers returns `409`. `state` is one of `Idle` (tsnet
+not started yet; Mihomo starts it lazily on the first dial or DNS query),
+`Starting`, `NeedsLogin`, `NeedsMachineAuth`, `Running`, `Stopped` or `Error`.
+Status queries never start tsnet.
+
+Security: `Status` never carries the login URL, only `loginUrlAvailable`.
+`login-url` returns `403` on listeners without a controller secret (and on the
+secretless Unix socket/pipe listeners). Callers must keep the URL in memory and
+never log or persist it. tsnet log lines, health messages and API errors are
+redacted (`https://<host>/a/[redacted]`, `tskey-[redacted]`, node keys, bearer
+tokens, cookies). Unknown names return `404`, operations on a server that has
+not started or has no pending login return `409`.
 
 ## Stable tracking and releases
 

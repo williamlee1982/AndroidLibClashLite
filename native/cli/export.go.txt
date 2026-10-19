@@ -11,6 +11,7 @@ import (
 
 	_ "cfa/environment"
 	_ "cfa/native/autoswitch/api"
+	_ "cfa/native/tailscale/api"
 )
 
 // AndroidMihomoCLI_v1 is only for a standalone process, never a JNI caller.
