@@ -38,6 +38,27 @@ type Status struct {
 	MagicDNSSuffix    string   `json:"magicDnsSuffix,omitempty"`
 	Health            []string `json:"health,omitempty"`
 	Error             string   `json:"error,omitempty"`
+	// Provider names the proxy provider that supplied the outbound; empty for
+	// outbounds declared in the top-level proxies list.
+	Provider string `json:"provider,omitempty"`
+	// Config is the effective, non-secret configuration of the outbound.
+	Config *Config `json:"config,omitempty"`
+}
+
+// Config summarizes the effective outbound options after providers and
+// override scripts were applied. It never carries the auth key or the full
+// control URL.
+type Config struct {
+	// Hostname is the configured hostname option, which may differ from the
+	// live Hostname reported by tsnet.
+	Hostname string `json:"hostname,omitempty"`
+	// StateDir is the resolved absolute tsnet state directory.
+	StateDir string `json:"stateDir,omitempty"`
+	// StateDirDefault reports that StateDir is Mihomo's implicit default.
+	StateDirDefault bool   `json:"stateDirDefault"`
+	Ephemeral       bool   `json:"ephemeral"`
+	HasAuthKey      bool   `json:"hasAuthKey"`
+	ControlURLHost  string `json:"controlUrlHost,omitempty"`
 }
 
 // Snapshot is the subset of ipnstate.Status the mapping needs.

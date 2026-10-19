@@ -27,6 +27,8 @@ type Controller struct {
 	Background context.Context
 	// LoginTimeout bounds the asynchronous start and login request.
 	LoginTimeout time.Duration
+	// Config is reported with every Status.
+	Config Config
 }
 
 // ErrLoginURLUnavailable means no interactive login is pending.
@@ -37,6 +39,13 @@ var ErrInvalidLoginURL = errors.New("tailscale login URL is invalid")
 
 // Status never starts tsnet.
 func (c *Controller) Status(ctx context.Context) Status {
+	status := c.status(ctx)
+	config := c.Config
+	status.Config = &config
+	return status
+}
+
+func (c *Controller) status(ctx context.Context) Status {
 	life := c.Lifecycle.Snapshot()
 	switch life.Phase {
 	case PhaseClosed:

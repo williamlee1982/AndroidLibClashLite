@@ -328,3 +328,23 @@ func TestMarkControllerAuth(t *testing.T) {
 		t.Error("unmarked context authenticated")
 	}
 }
+
+func TestStatusCarriesConfigInEveryPhase(t *testing.T) {
+	config := Config{Hostname: "phone", StateDir: "/data/home/ts", Ephemeral: true}
+	life := &Lifecycle{}
+	controller := &Controller{Name: "ts", Lifecycle: life, Backend: &fakeBackend{}, Config: config}
+	check := func(phase string) {
+		t.Helper()
+		got := controller.Status(context.Background())
+		if got.Config == nil || *got.Config != config {
+			t.Fatalf("%s: config %+v", phase, got.Config)
+		}
+	}
+	check("idle")
+	life.Starting()
+	check("starting")
+	life.Finished(errors.New("boom"))
+	check("failed")
+	life.Closed()
+	check("closed")
+}
