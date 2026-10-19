@@ -10,10 +10,14 @@ package outbound
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	tailscalestate "cfa/native/tailscale"
+
+	C "github.com/metacubex/mihomo/constant"
 )
 
 var tailscaleLifecycles sync.Map // *Tailscale -> *tailscalestate.Lifecycle
@@ -50,7 +54,27 @@ func (t *Tailscale) TailscaleController() *tailscalestate.Controller {
 		Backend:      tailscaleBackend{t},
 		Background:   t.ctx,
 		LoginTimeout: 2 * time.Minute,
+		Config:       tailscaleConfig(t.option),
 	}
+}
+
+// tailscaleConfig summarizes the effective options without secrets: the auth
+// key becomes a flag and the control URL is reduced to its host. NewTailscale
+// has already resolved StateDir to an absolute path.
+func tailscaleConfig(option TailscaleOption) tailscalestate.Config {
+	config := tailscalestate.Config{
+		Hostname:        strings.TrimSpace(option.Hostname),
+		StateDir:        option.StateDir,
+		StateDirDefault: option.StateDir == C.Path.Resolve("tailscale"),
+		Ephemeral:       option.Ephemeral,
+		HasAuthKey:      strings.TrimSpace(option.AuthKey) != "",
+	}
+	if control := strings.TrimSpace(option.ControlURL); control != "" {
+		if parsed, err := url.Parse(control); err == nil {
+			config.ControlURLHost = strings.ToLower(parsed.Hostname())
+		}
+	}
+	return config
 }
 
 type tailscaleBackend struct{ t *Tailscale }
