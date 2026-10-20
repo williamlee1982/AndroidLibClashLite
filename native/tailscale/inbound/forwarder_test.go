@@ -310,3 +310,32 @@ func TestForwardErrorClosesBothDirections(t *testing.T) {
 		t.Fatal("target conn still open after client closed")
 	}
 }
+
+// Stop racing a Listen that has not returned yet: the listener appears after
+// Stop closed resources and must still be closed, or Stop blocks forever in
+// Accept (seen as a CI hang of TestReconcileCloseMayReenterRegistry).
+func TestForwardStopDuringListen(t *testing.T) {
+	listener := newTestPipeListener()
+	entered, release := make(chan struct{}), make(chan struct{})
+	m := NewManager([]Forward{testForward(20022, 20023)}, Options{
+		Listen: func(string, string) (net.Listener, error) {
+			close(entered)
+			<-release
+			return listener, nil
+		},
+	})
+	m.Start()
+	<-entered
+	done := make(chan struct{})
+	go func() { m.Stop(); close(done) }()
+	time.Sleep(20 * time.Millisecond) // let Stop close resources while Listen is pending
+	close(release)
+	waitFor(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+}
