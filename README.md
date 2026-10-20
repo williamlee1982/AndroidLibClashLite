@@ -217,18 +217,33 @@ proxies:
 ```
 
 - Only TCP is supported. `target` must be an IP literal `ip:port`, loopback
-  unless `allow-lan-target: true`. Invalid entries fail the profile load.
+  unless `allow-lan-target: true`. Even then only private LAN addresses are
+  accepted (10/8, 172.16/12, 192.168/16, 169.254/16, fc00::/7): public
+  addresses would make the node a tailnet-to-internet relay, and CGNAT
+  100.64/10 and IPv6 link-local are rejected too. Invalid entries fail the
+  profile load.
 - Parsing never starts anything. After `ApplyConfig` (JNI and CLI), an outbound
   with forwards starts tsnet eagerly and registers `listen` on its tailnet
   addresses once the node is `Running`. Outbounds without forwards stay lazy.
 - On reload, a superseded outbound that shares a state directory with a running
   one is closed before the new one starts, so one identity never runs twice.
-  Connections through the old instance are dropped.
+  Connections through the old instance are dropped. The reload waits at most
+  10 s for that close (it can wait for an in-flight tsnet start); after that it
+  returns and the new instance starts as soon as the old one has closed.
+- Within one configuration, a forwarding outbound whose resolved `state-dir`
+  is already used by an earlier outbound (by proxy name order) is not started
+  and reports `"state":"Error","error":"state-dir shared with <name>"`. Give
+  each tailscale proxy its own `state-dir`.
 - Each forward accepts at most 64 concurrent connections. Target dials use
   Mihomo's dialer, with no proxy and with the routing mark and socket
   protection.
 - Proxy-provider members are not supported. They report
-  `"state":"Error","error":"unsupported in proxy providers"`.
+  `"state":"Error","error":"unsupported in proxy providers"` after a config
+  apply. Known limitation: a provider refresh replaces members without an
+  apply, so refreshed members report no `inboundForwards` until the next
+  config reload (they never listen either way).
+- A listener whose `Accept` fails is re-created with the same backoff as a
+  failing `Listen` (1 s doubling up to 1 min).
 - The ports are open to every tailnet peer that the tailnet ACL allows.
   Restrict them in the ACL.
 

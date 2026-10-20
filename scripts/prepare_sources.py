@@ -117,7 +117,9 @@ def prepare_sources(repo, work, core):
     patch(tailscale, '\t\tgo t.watchBackendState()\n\t})\n\treturn t.startErr\n',
           '\t\tgo t.watchBackendState()\n\t})\n\ttailscaleStartFinished(t, t.startErr)\n\treturn t.startErr\n')
     patch(tailscale, 'func (t *Tailscale) Close() error {\n\tt.cancel()\n',
-          'func (t *Tailscale) Close() error {\n\ttailscaleClosed(t)\n\tt.cancel()\n')
+          'func (t *Tailscale) Close() error {\n\ttailscaleClosed(t)\n\tt.cancel()\n'
+          # Inbound cleanup must follow cancel: see InboundController.
+          '\ttailscaleInboundClosed(t)\n')
     patch(tailscale, 'log.Infoln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))',
           'log.Infoln("[Tailscale](%s) %s", option.Name, tailscaleLogLine(format, args...))')
     patch(tailscale, 'log.Debugln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))',

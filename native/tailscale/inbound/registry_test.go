@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func registryForward() Forward {
@@ -228,4 +230,69 @@ func TestSnapshotNilAndUnknown(t *testing.T) {
 	if r.Snapshot(nil) != nil || r.Snapshot(&Controller{}) != nil {
 		t.Fatal("unknown controller has a snapshot")
 	}
+}
+
+// A3: two top-level outbounds of one configuration resolving to the same
+// state dir would run one tsnet identity twice. The first wins; a later one
+// with forwards is not started and reports why.
+func TestReconcileDuplicateStateDirNotStarted(t *testing.T) {
+	ev := &events{}
+	first := fakeController("first", "/state/dup", nil, ev)
+	second := fakeController("second", "/state/dup", []Forward{registryForward()}, ev)
+	r := NewRegistry()
+	r.Reconcile([]Entry{
+		{Name: "a-first", TopLevel: true, Controller: first},
+		{Name: "b-second", TopLevel: true, Controller: second},
+	})
+	defer r.Reconcile(nil)
+	if ev.count("start second") != 0 || ev.count("close first") != 0 {
+		t.Fatalf("duplicate state dir started or closed: %v", ev.snapshot())
+	}
+	got := r.Snapshot(second)
+	if len(got) != 1 || got[0].State != StateError || !strings.Contains(got[0].Error, "state-dir shared with a-first") {
+		t.Fatalf("snapshot = %+v", got)
+	}
+}
+
+// A2: closing a superseded outbound must not stall ApplyConfig forever. After
+// closeWaitTimeout Reconcile returns; the replacement starts only once the
+// old instance has actually closed (one identity at a time).
+func TestReconcileSlowCloseDefersStart(t *testing.T) {
+	saved := closeWaitTimeout
+	closeWaitTimeout = 20 * time.Millisecond
+	defer func() { closeWaitTimeout = saved }()
+	ev := &events{}
+	release := make(chan struct{})
+	old := fakeController("old", "/state/slow", nil, ev)
+	old.Close = func() error { <-release; ev.add("close old"); return nil }
+	newOne := fakeController("new", "/state/slow", []Forward{registryForward()}, ev)
+	r := NewRegistry()
+	r.Reconcile([]Entry{{Name: "ts", TopLevel: true, Controller: old}})
+	done := make(chan struct{})
+	go func() {
+		r.Reconcile([]Entry{{Name: "ts", TopLevel: true, Controller: newOne}})
+		close(done)
+	}()
+	waitFor(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+	if ev.count("start new") != 0 {
+		t.Fatalf("replacement started before old closed: %v", ev.snapshot())
+	}
+	if got := r.Snapshot(newOne); len(got) != 1 || got[0].State != StateWaiting {
+		t.Fatalf("pending replacement snapshot = %+v", got)
+	}
+	close(release)
+	waitFor(t, func() bool { return ev.count("start new") == 1 })
+	log := ev.snapshot()
+	if log[0] != "close old" {
+		t.Fatalf("order = %v", log)
+	}
+	waitFor(t, func() bool { s := r.Snapshot(newOne); return len(s) == 1 && s[0].State == StateListening })
+	r.Reconcile(nil)
 }
