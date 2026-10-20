@@ -201,6 +201,13 @@ not started yet; Mihomo starts it lazily on the first dial or DNS query),
 `Starting`, `NeedsLogin`, `NeedsMachineAuth`, `Running`, `Stopped` or `Error`.
 Status queries never start tsnet.
 
+Run `python3 scripts/test_shared.py -count=1` to test the native packages with
+the shared core's source overlay and `foss,with_gvisor,cmfa` tags on the host
+(using host-native DNS rather than the Android DNS patch). The config integration
+test parses real top-level and provider Tailscale outbounds, including optional
+SMUX, then checks the HTTP status handler and lookup against the running proxy
+registry. It needs no login, device, or network listeners.
+
 Security: `Status` never carries the login URL, only `loginUrlAvailable`.
 `login-url` returns `403` on listeners without a controller secret (and on the
 secretless Unix socket/pipe listeners). Callers must keep the URL in memory and
