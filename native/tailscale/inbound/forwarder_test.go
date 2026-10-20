@@ -276,3 +276,37 @@ func TestForwardWaitingState(t *testing.T) {
 	defer m.Stop()
 	waitFor(t, func() bool { return m.Snapshot()[0].State == StateWaiting })
 }
+
+func TestForwardStopWithoutStart(t *testing.T) {
+	m := NewManager([]Forward{testForward(20022, 20023)}, Options{})
+	done := make(chan struct{})
+	go func() { m.Stop(); close(done) }()
+	waitFor(t, func() bool {
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+// A side that fails (reset) or cannot half-close must tear down both
+// directions, or the opposite copy blocks forever and leaks the slot.
+func TestForwardErrorClosesBothDirections(t *testing.T) {
+	listener := newTestPipeListener()
+	targetLocal, targetRemote := net.Pipe()
+	m := NewManager([]Forward{testForward(20022, 20023)}, Options{
+		Listen: func(string, string) (net.Listener, error) { return listener, nil },
+		Dial:   func(context.Context, string, string) (net.Conn, error) { return targetLocal, nil },
+	})
+	m.Start()
+	defer m.Stop()
+	client := listener.connect()
+	waitFor(t, func() bool { return m.Snapshot()[0].ActiveConns == 1 })
+	_ = client.Close() // net.Pipe has no CloseWrite: target side must be closed too
+	waitFor(t, func() bool { return m.Snapshot()[0].ActiveConns == 0 })
+	if _, err := targetRemote.Write([]byte("x")); err == nil {
+		t.Fatal("target conn still open after client closed")
+	}
+}

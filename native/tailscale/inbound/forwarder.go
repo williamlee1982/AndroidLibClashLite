@@ -19,6 +19,9 @@ const (
 	StateError     State = "Error"
 )
 
+// DefaultMaxConns is the per-forward active connection limit (design D6).
+const DefaultMaxConns = 64
+
 // Snapshot is the public, non-secret status of one forward.
 type Snapshot struct {
 	Name        string
@@ -67,7 +70,7 @@ type Manager struct {
 
 func NewManager(forwards []Forward, options Options) *Manager {
 	if options.MaxConns <= 0 {
-		options.MaxConns = 64
+		options.MaxConns = DefaultMaxConns
 	}
 	if options.Ready == nil {
 		options.Ready = func() bool { return true }
@@ -114,12 +117,19 @@ func (m *Manager) Start() {
 }
 
 func (m *Manager) Stop() {
+	m.mu.Lock()
+	started := m.started
+	m.started = true // a later Start must not spawn listeners after Stop
+	m.mu.Unlock()
 	for _, f := range m.forwards {
 		f.stopOnce.Do(func() { close(f.stop) })
 		// Closing resources here, rather than waiting for run to observe stop,
 		// unblocks Accept and any active copies immediately. The run goroutine
 		// then performs the final cleanup before signalling done.
 		f.closeResources()
+	}
+	if !started {
+		return
 	}
 	for _, f := range m.forwards {
 		<-f.done
@@ -241,9 +251,16 @@ func (f *forwardRuntime) handle(client net.Conn) {
 	copyHalf := func(dst, src net.Conn) {
 		defer wg.Done()
 		_, copyErr := io.Copy(dst, src)
+		// After a clean EOF, half-close so the reverse direction can still
+		// deliver its reply. On an error, or when dst cannot half-close,
+		// tear down both sides so the other copy cannot block forever.
 		if cw, ok := dst.(interface{ CloseWrite() error }); ok && copyErr == nil {
-			_ = cw.CloseWrite()
+			if cw.CloseWrite() == nil {
+				return
+			}
 		}
+		_ = client.Close()
+		_ = target.Close()
 	}
 	wg.Add(2)
 	go copyHalf(target, client)
