@@ -3,6 +3,7 @@ package log
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/common/observable"
@@ -13,10 +14,13 @@ import (
 var (
 	logCh  = make(chan Event)
 	source = observable.NewObservable[Event](logCh)
-	level  = INFO
+	// level is atomic: ApplyConfig sets it while background goroutines (for
+	// example an eagerly started tsnet node) are logging.
+	level atomic.Int64
 )
 
 func init() {
+	level.Store(int64(INFO))
 	log.SetOutput(os.Stdout)
 	log.SetLevel(log.DebugLevel)
 	log.SetFormatter(&log.TextFormatter{
@@ -74,15 +78,15 @@ func UnSubscribe(sub observable.Subscription[Event]) {
 }
 
 func Level() LogLevel {
-	return level
+	return LogLevel(level.Load())
 }
 
 func SetLevel(newLevel LogLevel) {
-	level = newLevel
+	level.Store(int64(newLevel))
 }
 
 func print(data Event) {
-	if data.LogLevel < level {
+	if data.LogLevel < Level() {
 		return
 	}
 
