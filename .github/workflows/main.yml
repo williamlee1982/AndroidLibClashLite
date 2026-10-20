@@ -68,6 +68,9 @@ jobs:
           sdkmanager 'ndk;28.2.13676358'
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
 
+      - name: Test source patches
+        run: python3 -m unittest scripts/test_prepare_sources.py scripts/test_pinned_core.py
+
       - name: Test shared core overlay
         run: python3 scripts/test_shared.py -count=1
 

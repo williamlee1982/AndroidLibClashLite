@@ -5,7 +5,12 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// closeWaitTimeout bounds how long Reconcile (inside ApplyConfig) waits for a
+// superseded outbound to close before returning.
+var closeWaitTimeout = 10 * time.Second
 
 // ErrUnsupportedInProvider is reported for proxy-provider members that declare
 // forwards: a provider refresh replaces its outbounds without ApplyConfig, so
@@ -73,7 +78,12 @@ var Default = NewRegistry()
 //  2. a superseded outbound whose state dir equals a running one's is closed,
 //     so one tsnet identity never runs twice (design D4), before
 //  3. new top-level outbounds with forwards are started eagerly (D5) and
-//     their forwards begin listening once the node is ready.
+//     their forwards begin listening once the node is ready. A forwarding
+//     outbound whose state dir is already used by an earlier outbound of the
+//     same configuration is not started and reports an error instead.
+//
+// Waiting for superseded outbounds to close is bounded by closeWaitTimeout;
+// past it Reconcile returns and the replacements start when the close ends.
 //
 // Provider members are recorded but never started (D7). Start and Close run
 // without the registry lock because Close re-enters through Forget.
@@ -85,6 +95,11 @@ func (r *Registry) Reconcile(entries []Entry) {
 	byController := make(map[*Controller]Entry, len(entries))
 	order := make([]*Controller, 0, len(entries))
 	dirs := map[string]struct{}{}
+	// owner maps a state dir to the first outbound of this configuration that
+	// uses it. A later forwarding outbound sharing it would run the same
+	// tsnet identity twice, so it is not started (A3).
+	owner := map[string]string{}
+	duplicateOf := map[*Controller]string{}
 	for _, entry := range entries {
 		c := entry.Controller
 		if c == nil {
@@ -98,6 +113,11 @@ func (r *Registry) Reconcile(entries []Entry) {
 		order = append(order, c)
 		if c.StateDir != "" {
 			dirs[c.StateDir] = struct{}{}
+			if first, taken := owner[c.StateDir]; taken {
+				duplicateOf[c] = first
+			} else {
+				owner[c.StateDir] = entry.Name
+			}
 		}
 	}
 
@@ -125,6 +145,11 @@ func (r *Registry) Reconcile(entries []Entry) {
 		reg := &registration{entry: byController[c]}
 		r.running[c] = reg
 		if reg.entry.TopLevel && reg.entry.Provider == "" && c.Forwards.HasForwards() {
+			if first, dup := duplicateOf[c]; dup {
+				reg.startErr = "state-dir shared with " + first
+				c.log("inbound: not starting %s: state-dir shared with %s", reg.entry.Name, first)
+				continue
+			}
 			start = append(start, c)
 		}
 	}
@@ -133,15 +158,55 @@ func (r *Registry) Reconcile(entries []Entry) {
 	for _, m := range stop {
 		m.Stop()
 	}
-	for _, c := range closeOld {
-		if c.Close != nil {
-			if err := c.Close(); err != nil {
-				c.log("inbound: close superseded outbound: %v", err)
-			}
+	if closed := closeAll(closeOld); !waitClosed(closed, closeWaitTimeout) {
+		// A superseded node is still closing (Close waits for an in-flight
+		// tsnet start). Do not stall ApplyConfig, and do not run the same
+		// identity twice: start the replacements once the close finishes.
+		for _, c := range closeOld {
+			c.log("inbound: superseded outbound still closing after %v; deferring start", closeWaitTimeout)
 		}
+		go func() {
+			<-closed
+			for _, c := range start {
+				r.start(c)
+			}
+		}()
+		return
 	}
 	for _, c := range start {
 		r.start(c)
+	}
+}
+
+// closeAll closes the controllers concurrently; the channel closes when all
+// have returned.
+func closeAll(controllers []*Controller) <-chan struct{} {
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, c := range controllers {
+		if c.Close == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(c *Controller) {
+			defer wg.Done()
+			if err := c.Close(); err != nil {
+				c.log("inbound: close superseded outbound: %v", err)
+			}
+		}(c)
+	}
+	go func() { wg.Wait(); close(done) }()
+	return done
+}
+
+func waitClosed(done <-chan struct{}, timeout time.Duration) bool {
+	t := time.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-done:
+		return true
+	case <-t.C:
+		return false
 	}
 }
 

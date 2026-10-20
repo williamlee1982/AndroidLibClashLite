@@ -39,7 +39,6 @@ func tailscaleStartFinished(t *Tailscale, err error) { t.tailscaleLifecycle().Fi
 func tailscaleClosed(t *Tailscale) {
 	t.tailscaleLifecycle().Closed()
 	tailscaleLifecycles.Delete(t)
-	tailscaleInboundClosed(t)
 }
 
 // tailscaleLogLine formats a tsnet log line with login URLs and keys redacted.

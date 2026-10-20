@@ -2,7 +2,6 @@ package inbound
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log"
 	"net"
@@ -171,15 +170,9 @@ func (f *forwardRuntime) run() {
 				f.closeResources()
 				return
 			}
-			if backoff < time.Minute {
-				backoff *= 2
-				if backoff > time.Minute {
-					backoff = time.Minute
-				}
-			}
+			backoff = nextBackoff(backoff)
 			continue
 		}
-		backoff = time.Second
 		f.mu.Lock()
 		// Stop closes f.stop before closeResources takes f.mu, so either it
 		// sees this listener or we see the stop here; never neither.
@@ -191,14 +184,33 @@ func (f *forwardRuntime) run() {
 		f.listener = listener
 		f.state, f.err = StateListening, ""
 		f.mu.Unlock()
-		f.acceptLoop(listener)
+		accepted, acceptErr := f.acceptLoop(listener)
 		f.mu.Lock()
 		f.listener = nil
 		f.mu.Unlock()
 		if !f.isStopping() {
 			_ = listener.Close()
 		}
+		if accepted {
+			backoff = time.Second
+		}
+		if acceptErr {
+			// An Accept that keeps failing must not re-listen in a hot loop:
+			// back off exactly like a failing Listen.
+			if f.wait(backoff) != nil {
+				f.closeResources()
+				return
+			}
+			backoff = nextBackoff(backoff)
+		}
 	}
+}
+
+func nextBackoff(d time.Duration) time.Duration {
+	if d *= 2; d > time.Minute {
+		return time.Minute
+	}
+	return d
 }
 
 func (f *forwardRuntime) wait(d time.Duration) error {
@@ -214,21 +226,27 @@ func (f *forwardRuntime) wait(d time.Duration) error {
 	return f.options.Wait(ctx, d)
 }
 
-func (f *forwardRuntime) acceptLoop(listener net.Listener) {
+// acceptLoop serves one listener. It reports whether any connection was
+// accepted (which resets the backoff) and whether it ended on an unexpected
+// Accept error (which the caller backs off from).
+func (f *forwardRuntime) acceptLoop(listener net.Listener) (accepted, failed bool) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			if f.isStopping() || errors.Is(err, net.ErrClosed) {
-				return
+			if f.isStopping() {
+				return accepted, false
 			}
+			// Includes net.ErrClosed when the node closed the listener
+			// underneath us: back off rather than re-listen immediately.
 			f.setState(StateError, err.Error())
-			return
+			return accepted, true
 		}
+		accepted = true
 		f.mu.Lock()
 		if f.isStopping() {
 			f.mu.Unlock()
 			_ = conn.Close()
-			return
+			return accepted, false
 		}
 		if f.active >= f.options.MaxConns {
 			f.rejected++
@@ -264,6 +282,9 @@ func (f *forwardRuntime) handle(client net.Conn) {
 		return
 	}
 	f.conns[target] = struct{}{}
+	if f.state == StateListening {
+		f.err = "" // the last dial failure no longer applies
+	}
 	f.mu.Unlock()
 
 	var wg sync.WaitGroup

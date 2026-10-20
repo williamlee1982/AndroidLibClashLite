@@ -117,7 +117,9 @@ func tailscaleInboundReady(t *Tailscale) bool {
 }
 
 // tailscaleInboundClosed stops the outbound's listeners and forwarded
-// connections. Called from the patched Close through tailscaleClosed.
+// connections. The patched Close calls it after t.cancel(): InboundController
+// stores and then re-checks t.ctx, so either that re-check sees the cancel or
+// this LoadAndDelete sees the stored controller; neither can be missed.
 func tailscaleInboundClosed(t *Tailscale) {
 	if c, ok := tailscaleInbounds.LoadAndDelete(t); ok {
 		inbound.Default.Forget(c.(*inbound.Controller))

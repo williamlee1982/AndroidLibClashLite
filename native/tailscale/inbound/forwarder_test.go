@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -338,4 +339,95 @@ func TestForwardStopDuringListen(t *testing.T) {
 			return false
 		}
 	})
+}
+
+type failingAcceptListener struct{ closed chan struct{} }
+
+func (l *failingAcceptListener) Accept() (net.Conn, error) {
+	select {
+	case <-l.closed:
+		return nil, net.ErrClosed
+	default:
+		return nil, errors.New("accept: transient failure")
+	}
+}
+func (l *failingAcceptListener) Close() error   { return nil }
+func (l *failingAcceptListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+// M4: a listener whose Accept keeps failing must back off like a failing
+// Listen does, instead of re-listening in a hot loop.
+func TestForwardAcceptErrorBacksOff(t *testing.T) {
+	var mu sync.Mutex
+	listens := 0
+	var waits []time.Duration
+	m := NewManager([]Forward{testForward(20022, 20023)}, Options{
+		Listen: func(string, string) (net.Listener, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			listens++
+			if listens > 1000 { // bound the RED hot loop
+				return nil, errors.New("hot loop")
+			}
+			return &failingAcceptListener{closed: make(chan struct{})}, nil
+		},
+		Wait: func(ctx context.Context, d time.Duration) error {
+			mu.Lock()
+			defer mu.Unlock()
+			waits = append(waits, d)
+			if len(waits) >= 4 {
+				return errors.New("enough")
+			}
+			return nil
+		},
+	})
+	m.Start()
+	defer m.Stop()
+	waitFor(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(waits) >= 4 })
+	mu.Lock()
+	defer mu.Unlock()
+	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+	for i, d := range want {
+		if waits[i] != d {
+			t.Fatalf("waits = %v, want prefix %v (listens=%d)", waits, want, listens)
+		}
+	}
+	if listens != 4 {
+		t.Fatalf("listens = %d, want 4 (one per backoff)", listens)
+	}
+	if s := m.Snapshot()[0]; s.State != StateError || !strings.Contains(s.Error, "transient") {
+		t.Fatalf("snapshot = %+v", s)
+	}
+}
+
+// L2: a target dial error is shown while listening and cleared by the next
+// successful dial, so the card does not keep a stale warning.
+func TestForwardDialErrorClearedAfterSuccess(t *testing.T) {
+	listener := newTestPipeListener()
+	var mu sync.Mutex
+	fail := true
+	m := NewManager([]Forward{testForward(20022, 20023)}, Options{
+		Listen: func(string, string) (net.Listener, error) { return listener, nil },
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if fail {
+				return nil, errors.New("connection refused")
+			}
+			local, remote := net.Pipe()
+			go func() { _, _ = io.Copy(io.Discard, remote) }()
+			return local, nil
+		},
+	})
+	m.Start()
+	defer m.Stop()
+	waitFor(t, func() bool { return m.Snapshot()[0].State == StateListening })
+	c1 := listener.connect()
+	waitFor(t, func() bool { return strings.Contains(m.Snapshot()[0].Error, "refused") })
+	_ = c1.Close()
+	mu.Lock()
+	fail = false
+	mu.Unlock()
+	c2 := listener.connect()
+	defer c2.Close()
+	waitFor(t, func() bool { s := m.Snapshot()[0]; return s.Error == "" && s.State == StateListening })
 }
