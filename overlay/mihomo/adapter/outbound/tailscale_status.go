@@ -58,6 +58,24 @@ func (t *Tailscale) TailscaleController() *tailscalestate.Controller {
 	}
 }
 
+// ParseProxy wraps configured outbounds for automatic cleanup and, optionally,
+// multiplexing. Their embedded ProxyAdapter interface does not include this
+// extension method, so explicitly forward it without unwrapping the live proxy
+// or bypassing its lifetime management. Non-Tailscale adapters return nil.
+func (p *autoCloseProxyAdapter) TailscaleController() *tailscalestate.Controller {
+	if provider, ok := p.ProxyAdapter.(tailscalestate.Provider); ok {
+		return provider.TailscaleController()
+	}
+	return nil
+}
+
+func (s *SingMux) TailscaleController() *tailscalestate.Controller {
+	if provider, ok := s.ProxyAdapter.(tailscalestate.Provider); ok {
+		return provider.TailscaleController()
+	}
+	return nil
+}
+
 // tailscaleConfig summarizes the effective options without secrets: the auth
 // key becomes a flag and the control URL is reduced to its host. NewTailscale
 // has already resolved StateDir to an absolute path.
