@@ -181,6 +181,13 @@ func (f *forwardRuntime) run() {
 		}
 		backoff = time.Second
 		f.mu.Lock()
+		// Stop closes f.stop before closeResources takes f.mu, so either it
+		// sees this listener or we see the stop here; never neither.
+		if f.isStopping() {
+			f.mu.Unlock()
+			_ = listener.Close()
+			continue // the loop top observes stop and returns
+		}
 		f.listener = listener
 		f.state, f.err = StateListening, ""
 		f.mu.Unlock()
@@ -218,6 +225,11 @@ func (f *forwardRuntime) acceptLoop(listener net.Listener) {
 			return
 		}
 		f.mu.Lock()
+		if f.isStopping() {
+			f.mu.Unlock()
+			_ = conn.Close()
+			return
+		}
 		if f.active >= f.options.MaxConns {
 			f.rejected++
 			f.mu.Unlock()
@@ -244,6 +256,13 @@ func (f *forwardRuntime) handle(client net.Conn) {
 		return
 	}
 	f.mu.Lock()
+	if f.isStopping() {
+		f.mu.Unlock()
+		_ = target.Close()
+		_ = client.Close()
+		f.finish(client, true)
+		return
+	}
 	f.conns[target] = struct{}{}
 	f.mu.Unlock()
 
