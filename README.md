@@ -185,7 +185,7 @@ JNI cores:
 | `POST /asterisk/tailscale/logout?name=N` | `204`; deauthorizes this node |
 
 `Status` is `{"name","state","loginUrlAvailable","tailnetIps","hostname",
-"dnsName","magicDnsSuffix","health","error","provider","config"}`. The list
+"dnsName","magicDnsSuffix","health","error","provider","config","inboundForwards"}`. The list
 reports the running core's effective outbounds, so outbounds from proxy
 providers and override scripts are included and follow provider refreshes.
 `provider` names the proxy provider (empty for top-level proxies); one adapter
@@ -199,7 +199,43 @@ outbound named `N` is used, or the only provider member with that name; a name
 supplied by several providers returns `409`. `state` is one of `Idle` (tsnet
 not started yet; Mihomo starts it lazily on the first dial or DNS query),
 `Starting`, `NeedsLogin`, `NeedsMachineAuth`, `Running`, `Stopped` or `Error`.
-Status queries never start tsnet.
+Status queries never start tsnet. An outbound with `inbound-forwards` is the
+exception to lazy start, see below.
+
+### Inbound forwards
+
+A top-level `tailscale` proxy can expose local TCP services to its tailnet:
+
+```yaml
+proxies:
+  - name: TS
+    type: tailscale
+    state-dir: ./tailscale-example
+    inbound-forwards:
+      - {listen: 20022, target: "127.0.0.1:20022", name: ssh}
+    # allow-lan-target: true   # needed for non-loopback targets
+```
+
+- Only TCP is supported. `target` must be an IP literal `ip:port`, loopback
+  unless `allow-lan-target: true`. Invalid entries fail the profile load.
+- Parsing never starts anything. After `ApplyConfig` (JNI and CLI), an outbound
+  with forwards starts tsnet eagerly and registers `listen` on its tailnet
+  addresses once the node is `Running`. Outbounds without forwards stay lazy.
+- On reload, a superseded outbound that shares a state directory with a running
+  one is closed before the new one starts, so one identity never runs twice.
+  Connections through the old instance are dropped.
+- Each forward accepts at most 64 concurrent connections. Target dials use
+  Mihomo's dialer, with no proxy and with the routing mark and socket
+  protection.
+- Proxy-provider members are not supported. They report
+  `"state":"Error","error":"unsupported in proxy providers"`.
+- The ports are open to every tailnet peer that the tailnet ACL allows.
+  Restrict them in the ACL.
+
+`inboundForwards` is omitted for outbounds without forwards. Otherwise it holds
+`[{"name","network","listen","target","state","error","activeConns",
+"totalConns","rejected"}]`, where `state` is `Listening`, `Waiting` (the node is
+not `Running` yet) or `Error`.
 
 Run `python3 scripts/test_shared.py -count=1` to test the native packages with
 the shared core's source overlay and `foss,with_gvisor,cmfa` tags on the host

@@ -101,9 +101,11 @@ def prepare_sources(repo, work, core):
     patch('config/config.go', '\tconfig := &Config{}\n',
           '\tconfig := &Config{AsteriskAutoSwitch: rawCfg.AsteriskAutoSwitch}\n')
     patch('hub/executor/executor.go', '\t"github.com/metacubex/mihomo/tunnel"\n)',
-          '\t"github.com/metacubex/mihomo/tunnel"\n\n\t"cfa/native/autoswitch"\n)')
+          '\t"github.com/metacubex/mihomo/tunnel"\n\n\t"cfa/native/autoswitch"\n'
+          '\ttailscaleinbound "cfa/native/tailscale/inbound/apply"\n)')
     patch('hub/executor/executor.go', '\ttunnel.OnRunning()\n',
-          '\ttunnel.OnRunning()\n\tautoswitch.Apply(cfg.AsteriskAutoSwitch)\n')
+          '\ttunnel.OnRunning()\n\tautoswitch.Apply(cfg.AsteriskAutoSwitch)\n'
+          '\ttailscaleinbound.Reconcile()\n')
     patches['log/log.go'] = (repo / 'overlay/mihomo/log/log.go').read_text(encoding='utf-8')
     # Typed Tailscale state for the Asterisk API: track the lazy tsnet start
     # without starting it from status queries, and keep login URLs and keys
@@ -120,8 +122,18 @@ def prepare_sources(repo, work, core):
           'log.Infoln("[Tailscale](%s) %s", option.Name, tailscaleLogLine(format, args...))')
     patch(tailscale, 'log.Debugln("[Tailscale](%s) %s", option.Name, fmt.Sprintf(format, args...))',
           'log.Debugln("[Tailscale](%s) %s", option.Name, tailscaleLogLine(format, args...))')
-    added = {'adapter/outbound/tailscale_status.go':
-             (repo / 'overlay/mihomo/adapter/outbound/tailscale_status.go').read_text(encoding='utf-8')}
+    # inbound-forwards: options, parse-time validation, and listener teardown
+    # on Close (through tailscaleClosed above). Forwards start from the
+    # executor hook, never at parse time.
+    patch(tailscale, '\tExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`\n',
+          '\tExitNodeAllowLANAccess *bool  `proxy:"exit-node-allow-lan-access,omitempty"`\n\n'
+          '\tInboundForwards []TailscaleInboundForward `proxy:"inbound-forwards,omitempty"`\n'
+          '\tAllowLanTarget  bool                      `proxy:"allow-lan-target,omitempty"`\n')
+    patch(tailscale, '\tif _, err := buildTailscaleMaskedPrefs(option); err != nil {',
+          '\tif err := tailscaleValidateInbound(option); err != nil {\n\t\treturn nil, err\n\t}\n'
+          '\tif _, err := buildTailscaleMaskedPrefs(option); err != nil {')
+    added = {name: (repo / 'overlay/mihomo' / name).read_text(encoding='utf-8')
+             for name in ('adapter/outbound/tailscale_status.go', 'adapter/outbound/tailscale_inbound.go')}
     # Record whether a Clash API listener requires a secret, for routes that
     # return sensitive data such as the on-demand Tailscale login URL.
     patch('hub/route/server.go', 'package route\n',

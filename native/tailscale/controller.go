@@ -29,6 +29,8 @@ type Controller struct {
 	LoginTimeout time.Duration
 	// Config is reported with every Status.
 	Config Config
+	// InboundForwards, when set, reports the outbound's inbound forwards.
+	InboundForwards func() []InboundForward
 }
 
 // ErrLoginURLUnavailable means no interactive login is pending.
@@ -42,7 +44,28 @@ func (c *Controller) Status(ctx context.Context) Status {
 	status := c.status(ctx)
 	config := c.Config
 	status.Config = &config
+	status.InboundForwards = c.inboundForwards()
 	return status
+}
+
+// inboundForwards redacts as defence in depth: names and errors are user or
+// network supplied text that ends up in the API response.
+func (c *Controller) inboundForwards() []InboundForward {
+	if c.InboundForwards == nil {
+		return nil
+	}
+	forwards := c.InboundForwards()
+	if len(forwards) == 0 {
+		return nil
+	}
+	out := make([]InboundForward, len(forwards))
+	for i, forward := range forwards {
+		forward.Name = Redact(forward.Name)
+		forward.Target = Redact(forward.Target)
+		forward.Error = Redact(forward.Error)
+		out[i] = forward
+	}
+	return out
 }
 
 func (c *Controller) status(ctx context.Context) Status {

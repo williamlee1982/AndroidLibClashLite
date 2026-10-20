@@ -11,6 +11,7 @@ const tailscaleCallTimeout = 8 * time.Second
 
 // QueryTailscaleStatus returns the same JSON as GET /asterisk/tailscale:
 // {"outbounds":[{"name","state","loginUrlAvailable","tailnetIps",...}]}.
+// Outbounds with inbound-forwards also carry "inboundForwards".
 // It never starts tsnet and never contains a login URL.
 func QueryTailscaleStatus() string {
 	ctx, cancel := context.WithTimeout(context.Background(), tailscaleCallTimeout)

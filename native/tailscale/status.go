@@ -43,6 +43,22 @@ type Status struct {
 	Provider string `json:"provider,omitempty"`
 	// Config is the effective, non-secret configuration of the outbound.
 	Config *Config `json:"config,omitempty"`
+	// InboundForwards reports the outbound's inbound-forwards. Absent when
+	// the outbound declares none (and on cores without the feature).
+	InboundForwards []InboundForward `json:"inboundForwards,omitempty"`
+}
+
+// InboundForward is the state of one tailnet-to-local TCP forward.
+type InboundForward struct {
+	Name        string `json:"name"`
+	Network     string `json:"network"`
+	Listen      int    `json:"listen"`
+	Target      string `json:"target"`
+	State       string `json:"state"` // Listening, Waiting or Error
+	Error       string `json:"error,omitempty"`
+	ActiveConns int    `json:"activeConns"`
+	TotalConns  uint64 `json:"totalConns"`
+	Rejected    uint64 `json:"rejected"`
 }
 
 // Config summarizes the effective outbound options after providers and
