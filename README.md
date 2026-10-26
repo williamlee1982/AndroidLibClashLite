@@ -184,7 +184,7 @@ JNI cores:
 | `GET /asterisk/tailscale/login-url?name=N` | `{"url":"https://..."}` while a login is pending; `Cache-Control: no-store` |
 | `POST /asterisk/tailscale/logout?name=N` | `204`; deauthorizes this node |
 
-`Status` is `{"name","state","loginUrlAvailable","tailnetIps","hostname",
+`Status` is `{"name","state","loginUrlAvailable","tailnetIps","peerIps","hostname",
 "dnsName","magicDnsSuffix","health","error","provider","config","inboundForwards"}`. The list
 reports the running core's effective outbounds, so outbounds from proxy
 providers and override scripts are included and follow provider refreshes.
@@ -193,6 +193,21 @@ is reported once even when Mihomo's implicit `default` provider wraps it.
 `config` is the non-secret effective configuration: `{"hostname","stateDir"
 (resolved absolute path),"stateDirDefault","ephemeral","hasAuthKey",
 "customControlUrl","controlUrlHost"}`; the auth key and the full control URL are never reported.
+
+`peerIps` is the other devices in that outbound's tailnet. Each element is one
+Tailscale address in canonical form (`100.64.0.9`, `fd7a:115c:a1e0::5`): no
+port, zone, hostname, or prefix. IPv4 comes before IPv6. The list includes
+every node still in the netmap, including nodes that are offline, and omits
+this node's own addresses. Addresses outside `100.64.0.0/10` and
+`fd7a:115c:a1e0::/48` are dropped, as is the ChromeOS VM range `100.115.92.0/23`.
+The field is per outbound. It is omitted when that outbound's netmap was not
+queried (tsnet has not started, the outbound is closed, or the status call
+failed). An empty array means the netmap was queried and has no other devices.
+AsteriskMETA reads `peerIps` only on `Running` outbounds: omission leaves the
+private-address list unchanged, and `[]` means the node is up with no other
+devices, so hosts this app added earlier are removed. A non-running outbound
+with either shape does not change that list. Hostnames, public keys, endpoints,
+user profiles and the login URL are not part of the field.
 
 Every route but the list accepts `provider=P`. Without it, the top-level
 outbound named `N` is used, or the only provider member with that name; a name
@@ -259,7 +274,18 @@ test parses real top-level and provider Tailscale outbounds, including optional
 SMUX, then checks the HTTP status handler and lookup against the running proxy
 registry. It needs no login, device, or network listeners.
 
+The peer list is read with the local API `Status` call rather than
+`StatusWithoutPeers`. Both take the same local-backend and magicsock locks;
+`Status` additionally walks the in-memory netmap and endpoint table. It does
+not dial out and does not start tsnet. Status routes still refuse to start
+tsnet. A personal tailnet polled every 2 seconds while logging in, and every
+10 seconds once running, keeps that extra walk short. The decoded peer status
+is discarded after its Tailscale addresses are copied. A failed query is an
+`Error` status with `peerIps` omitted, so a timeout does not look like an
+empty tailnet.
+
 Security: `Status` never carries the login URL, only `loginUrlAvailable`.
+`peerIps` carries addresses only.
 `login-url` returns `403` on listeners without a controller secret (and on the
 secretless Unix socket/pipe listeners). Callers must keep the URL in memory and
 never log or persist it. tsnet log lines, health messages and API errors are

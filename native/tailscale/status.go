@@ -46,6 +46,12 @@ type Status struct {
 	// InboundForwards reports the outbound's inbound-forwards. Absent when
 	// the outbound declares none (and on cores without the feature).
 	InboundForwards []InboundForward `json:"inboundForwards,omitempty"`
+	// PeerIPs is nil when this status did not query the netmap, and the JSON
+	// field is then omitted. A non-nil slice, including an empty one, means
+	// the netmap was read: other nodes' Tailscale addresses, never this
+	// node's, with no names, keys, or endpoints. The app treats omission as
+	// "unknown" and an empty array as "no other devices".
+	PeerIPs *[]string `json:"peerIps,omitempty"`
 }
 
 // InboundForward is the state of one tailnet-to-local TCP forward.
@@ -89,6 +95,13 @@ type Snapshot struct {
 	DNSName        string
 	MagicDNSSuffix string
 	Health         []string
+	// PeersQueried is true when PeerIPs was filled from a status that
+	// included the netmap. PeerIPs may be empty. SelfTailscaleIPs are this
+	// node's addresses that are not already in TailscaleIPs; both are
+	// excluded from the reported peer list.
+	PeersQueried     bool
+	PeerIPs          []netip.Addr
+	SelfTailscaleIPs []netip.Addr
 }
 
 // FromSnapshot maps a tsnet status snapshot to Status. The auth URL only
@@ -129,15 +142,14 @@ func FromSnapshot(name string, snapshot Snapshot) Status {
 			addresses = append(addresses, address.Unmap())
 		}
 	}
-	sort.SliceStable(addresses, func(i, j int) bool {
-		// IPv4 first, then natural order, so clients can display a primary IP.
-		if addresses[i].Is4() != addresses[j].Is4() {
-			return addresses[i].Is4()
-		}
-		return addresses[i].Less(addresses[j])
-	})
+	sortTailscaleIPs(addresses)
 	for _, address := range addresses {
 		status.TailnetIPs = append(status.TailnetIPs, address.String())
+	}
+	if snapshot.PeersQueried {
+		// Pointer to a non-nil slice, so an empty report is [] and not omitted.
+		peerIPs := peerIPStrings(snapshot)
+		status.PeerIPs = &peerIPs
 	}
 	for _, warning := range snapshot.Health {
 		if warning = strings.TrimSpace(Redact(warning)); warning != "" {
@@ -154,4 +166,70 @@ func ErrorStatus(name string, err error) Status {
 		message = Redact(err.Error())
 	}
 	return Status{Name: name, State: StateError, TailnetIPs: []string{}, Error: message}
+}
+
+// Ranges Tailscale assigns node addresses from. The ChromeOS VM range sits
+// inside the IPv4 range but is not used for node addresses; tsaddr.IsTailscaleIP
+// excludes it the same way. 100.100.100.100 (the local service address) is
+// inside the IPv4 range and is kept if a peer status actually lists it.
+var (
+	tailscaleIPv4 = netip.MustParsePrefix("100.64.0.0/10")
+	chromeOSVM    = netip.MustParsePrefix("100.115.92.0/23")
+	tailscaleIPv6 = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+)
+
+func isTailscaleAssignedIP(ip netip.Addr) bool {
+	if ip.Is4() {
+		return tailscaleIPv4.Contains(ip) && !chromeOSVM.Contains(ip)
+	}
+	return ip.Is6() && tailscaleIPv6.Contains(ip)
+}
+
+func sortTailscaleIPs(addresses []netip.Addr) {
+	sort.SliceStable(addresses, func(i, j int) bool {
+		// IPv4 first, then natural order, so clients can display a primary IP.
+		if addresses[i].Is4() != addresses[j].Is4() {
+			return addresses[i].Is4()
+		}
+		return addresses[i].Less(addresses[j])
+	})
+}
+
+// peerIPStrings is the peerIps array for a snapshot whose netmap was queried.
+// The result is never nil. This node's addresses, addresses outside the
+// Tailscale ranges, and duplicates are dropped. Offline peers are not a
+// concept here: every address the caller supplies is a netmap address.
+func peerIPStrings(snapshot Snapshot) []string {
+	self := map[netip.Addr]struct{}{}
+	for _, address := range append(append([]netip.Addr{}, snapshot.TailscaleIPs...), snapshot.SelfTailscaleIPs...) {
+		if !address.IsValid() {
+			continue
+		}
+		self[address.Unmap().WithZone("")] = struct{}{}
+	}
+	selected := make([]netip.Addr, 0, len(snapshot.PeerIPs))
+	seen := map[netip.Addr]struct{}{}
+	for _, address := range snapshot.PeerIPs {
+		if !address.IsValid() {
+			continue
+		}
+		address = address.Unmap().WithZone("")
+		if !isTailscaleAssignedIP(address) {
+			continue
+		}
+		if _, ok := self[address]; ok {
+			continue
+		}
+		if _, ok := seen[address]; ok {
+			continue
+		}
+		seen[address] = struct{}{}
+		selected = append(selected, address)
+	}
+	sortTailscaleIPs(selected)
+	formatted := make([]string, len(selected))
+	for i, address := range selected {
+		formatted[i] = address.String()
+	}
+	return formatted
 }
