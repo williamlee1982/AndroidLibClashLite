@@ -112,7 +112,15 @@ func (b tailscaleBackend) Query(ctx context.Context) (tailscalestate.Snapshot, e
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	st, err := lc.StatusWithoutPeers(ctx)
+	// Status includes the netmap. StatusWithoutPeers does not, so the app
+	// cannot learn other devices' addresses from it. Both calls take the
+	// same local-backend and magicsock locks; the peer walk is the extra
+	// work, and it does not dial the network or start tsnet. The controller
+	// only reaches this after the server has started, and the app polls
+	// every 2s while logging in and every 10s otherwise. The full peer
+	// status (names, keys, endpoints, users) is decoded only so the
+	// Tailscale IPs can be copied into the snapshot. Nothing else is kept.
+	st, err := lc.Status(ctx)
 	if err != nil {
 		return tailscalestate.Snapshot{}, err
 	}
@@ -121,13 +129,21 @@ func (b tailscaleBackend) Query(ctx context.Context) (tailscalestate.Snapshot, e
 		AuthURL:      st.AuthURL,
 		TailscaleIPs: st.TailscaleIPs,
 		Health:       st.Health,
+		PeersQueried: true,
 	}
 	if st.Self != nil {
 		snapshot.HostName = st.Self.HostName
 		snapshot.DNSName = st.Self.DNSName
+		snapshot.SelfTailscaleIPs = st.Self.TailscaleIPs
 	}
 	if st.CurrentTailnet != nil {
 		snapshot.MagicDNSSuffix = st.CurrentTailnet.MagicDNSSuffix
+	}
+	for _, peer := range st.Peer {
+		if peer == nil {
+			continue
+		}
+		snapshot.PeerIPs = append(snapshot.PeerIPs, peer.TailscaleIPs...)
 	}
 	return snapshot, nil
 }

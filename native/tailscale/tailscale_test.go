@@ -41,6 +41,124 @@ func TestFromSnapshotMapsStatesAndHidesLoginURL(t *testing.T) {
 	}
 }
 
+func peerIPsJSON(t *testing.T, status Status) (present bool, ips []string) {
+	t.Helper()
+	data, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	field, ok := raw["peerIps"]
+	if !ok {
+		return false, nil
+	}
+	if string(field) == "null" {
+		t.Fatalf("peerIps is null; omit the field or send an array: %s", data)
+	}
+	if err := json.Unmarshal(field, &ips); err != nil {
+		t.Fatalf("peerIps %s: %v", field, err)
+	}
+	for _, ip := range ips {
+		parsed, err := netip.ParseAddr(ip)
+		if err != nil || parsed.String() != ip || parsed.Zone() != "" {
+			t.Fatalf("peerIps element %q is not a canonical address without a port, zone, or name", ip)
+		}
+	}
+	return true, ips
+}
+
+func TestFromSnapshotOmitsPeerIPsWhenPeersWereNotQueried(t *testing.T) {
+	got := FromSnapshot("ts", Snapshot{
+		BackendState: "Running",
+		TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.2")},
+		// A stale candidate must not be reported when the backend did not
+		// query the netmap. The app treats a missing field as "unknown".
+		PeerIPs: []netip.Addr{netip.MustParseAddr("100.64.0.9")},
+	})
+	if present, ips := peerIPsJSON(t, got); present {
+		t.Fatalf("peerIps = %v, want the field omitted", ips)
+	}
+}
+
+func TestFromSnapshotEmitsEmptyPeerIPsWhenTheNetmapHasNoOtherNodes(t *testing.T) {
+	got := FromSnapshot("ts", Snapshot{
+		BackendState: "Running",
+		TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.2")},
+		PeersQueried: true,
+	})
+	present, ips := peerIPsJSON(t, got)
+	if !present || len(ips) != 0 {
+		t.Fatalf("peerIps present=%v ips=%v, want []", present, ips)
+	}
+	data, _ := json.Marshal(got)
+	if !strings.Contains(string(data), `"peerIps":[]`) {
+		t.Fatalf("empty report must be an array, not an omitted field: %s", data)
+	}
+}
+
+func TestFromSnapshotEmptyPeerReportWhenNothingAssignableRemains(t *testing.T) {
+	got := FromSnapshot("ts", Snapshot{
+		BackendState: "NeedsLogin",
+		AuthURL:      fixtureLoginURL,
+		PeersQueried: true,
+		PeerIPs:      []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("100.115.92.10")},
+	})
+	if got.State != StateNeedsLogin || !got.LoginURLAvailable {
+		t.Fatalf("state %+v", got)
+	}
+	present, ips := peerIPsJSON(t, got)
+	if !present || len(ips) != 0 {
+		t.Fatalf("filtered report present=%v ips=%v, want []", present, ips)
+	}
+}
+
+func TestFromSnapshotReportsOtherNodesTailscaleIPsOnly(t *testing.T) {
+	self4 := netip.MustParseAddr("100.64.0.2")
+	self6 := netip.MustParseAddr("fd7a:115c:a1e0::1")
+	got := FromSnapshot("ts", Snapshot{
+		BackendState:     "Running",
+		AuthURL:          fixtureLoginURL,
+		TailscaleIPs:     []netip.Addr{self6, self4},
+		SelfTailscaleIPs: []netip.Addr{netip.MustParseAddr("fd7a:115c:a1e0::8")},
+		PeersQueried:     true,
+		PeerIPs: []netip.Addr{
+			netip.MustParseAddr("fd7a:115c:a1e0::5"),
+			self4,
+			netip.MustParseAddr("100.64.0.9"),
+			netip.MustParseAddr("100.64.0.9"),
+			netip.MustParseAddr("8.8.8.8"),
+			netip.MustParseAddr("100.115.92.10"),
+			netip.MustParseAddr("fd00::1"),
+			{},
+			netip.MustParseAddr("::ffff:100.64.0.3"),
+			netip.MustParseAddr("fd7a:115c:a1e0:0:0:0:0:5"),
+			netip.MustParseAddr("fd7a:115c:a1e0::8"),
+			netip.MustParseAddr("fd7a:115c:a1e0::5%eth0"),
+		},
+		Health: []string{"warning with " + fixtureAuthKey},
+	})
+	present, ips := peerIPsJSON(t, got)
+	if !present {
+		t.Fatal("queried peers omitted peerIps")
+	}
+	want := []string{"100.64.0.3", "100.64.0.9", "fd7a:115c:a1e0::5"}
+	if strings.Join(ips, ",") != strings.Join(want, ",") {
+		t.Fatalf("peerIps %v, want %v", ips, want)
+	}
+	if strings.Join(got.TailnetIPs, ",") != "100.64.0.2,fd7a:115c:a1e0::1" {
+		t.Fatalf("self addresses changed: %v", got.TailnetIPs)
+	}
+	data, _ := json.Marshal(got)
+	for _, secret := range []string{"0123456789abcdef", "kFIXTURE", "8.8.8.8", "100.115.92.10", "fd00::1", "%eth0", "phone", "nodekey"} {
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("%q leaked into status: %s", secret, data)
+		}
+	}
+}
+
 func TestFromSnapshotOrdersAddressesAndTrimsNames(t *testing.T) {
 	got := FromSnapshot("ts", Snapshot{
 		BackendState:   "Running",
@@ -211,6 +329,49 @@ func TestControllerLoginFlow(t *testing.T) {
 	}
 	if _, err := c.LoginURL(context.Background()); !errors.Is(err, ErrLoginURLUnavailable) {
 		t.Fatalf("after logout: %v", err)
+	}
+}
+
+func TestControllerOmitsPeerIPsUntilTheyAreQueried(t *testing.T) {
+	idle, _ := newController()
+	if present, ips := peerIPsJSON(t, idle.Status(context.Background())); present {
+		t.Fatalf("idle peerIps = %v", ips)
+	}
+
+	running, backend := newController()
+	backend.snapshot = Snapshot{
+		BackendState: "Running",
+		TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.2")},
+		PeersQueried: true,
+		PeerIPs:      []netip.Addr{netip.MustParseAddr("100.64.0.9"), netip.MustParseAddr("100.64.0.2")},
+	}
+	_ = backend.Start()
+	present, ips := peerIPsJSON(t, running.Status(context.Background()))
+	if !present || strings.Join(ips, ",") != "100.64.0.9" {
+		t.Fatalf("running peerIps present=%v ips=%v", present, ips)
+	}
+
+	backend.mu.Lock()
+	backend.snapshot.BackendState = "Stopped"
+	backend.snapshot.PeerIPs = []netip.Addr{netip.MustParseAddr("100.64.0.9")}
+	backend.mu.Unlock()
+	running.Lifecycle.LoginResult(running.Lifecycle.LoginStarted(), errors.New("login failed"))
+	failed := running.Status(context.Background())
+	if failed.State != StateError {
+		t.Fatalf("state %s", failed.State)
+	}
+	if present, ips := peerIPsJSON(t, failed); present {
+		t.Fatalf("error status must not report peers: %v", ips)
+	}
+
+	backend.mu.Lock()
+	backend.queryErr = errors.New("local api down")
+	backend.snapshot = Snapshot{BackendState: "Running", PeersQueried: true, PeerIPs: []netip.Addr{netip.MustParseAddr("100.64.0.9")}}
+	backend.mu.Unlock()
+	if got := running.Status(context.Background()); got.State != StateError {
+		t.Fatalf("query error state %+v", got)
+	} else if present, ips := peerIPsJSON(t, got); present {
+		t.Fatalf("failed query must omit peerIps, got %v", ips)
 	}
 }
 

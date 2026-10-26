@@ -10,7 +10,9 @@ import (
 const tailscaleCallTimeout = 8 * time.Second
 
 // QueryTailscaleStatus returns the same JSON as GET /asterisk/tailscale:
-// {"outbounds":[{"name","state","loginUrlAvailable","tailnetIps",...}]}.
+// {"outbounds":[{"name","state","loginUrlAvailable","tailnetIps","peerIps",...}]}.
+// peerIps is omitted when that outbound's netmap was not queried, and is an
+// array (possibly empty) of other nodes' Tailscale addresses when it was.
 // Outbounds with inbound-forwards also carry "inboundForwards".
 // It never starts tsnet and never contains a login URL.
 func QueryTailscaleStatus() string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -95,6 +96,60 @@ func do(t *testing.T, h http.Handler, method, target string) (int, string, http.
 	h.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
 	body, _ := io.ReadAll(rec.Result().Body)
 	return rec.Code, string(body), rec.Result().Header
+}
+
+func TestStatusesPeerIPsFollowWhetherTheNetmapWasQueried(t *testing.T) {
+	idle := fakeOutbound{&tailscale.Controller{Name: "idle", Lifecycle: &tailscale.Lifecycle{}, Backend: &fakeBackend{}}}
+	withEntries(t,
+		adapterEntry{name: "up", adapter: started("up", tailscale.Snapshot{
+			BackendState: "Running",
+			TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.2")},
+			PeersQueried: true,
+			PeerIPs: []netip.Addr{
+				netip.MustParseAddr("100.64.0.9"),
+				netip.MustParseAddr("fd7a:115c:a1e0::5"),
+				netip.MustParseAddr("100.64.0.2"),
+			},
+		})},
+		adapterEntry{name: "alone", adapter: started("alone", tailscale.Snapshot{
+			BackendState: "Running",
+			TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.4")},
+			PeersQueried: true,
+		})},
+		adapterEntry{name: "idle", adapter: idle},
+	)
+	_, body := listOutbounds(t)
+	var raw struct {
+		Outbounds []map[string]json.RawMessage `json:"outbounds"`
+	}
+	if err := json.Unmarshal([]byte(body), &raw); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]map[string]json.RawMessage{}
+	for _, outbound := range raw.Outbounds {
+		var name string
+		if err := json.Unmarshal(outbound["name"], &name); err != nil {
+			t.Fatal(err)
+		}
+		byName[name] = outbound
+	}
+	if _, ok := byName["up"]["peerIps"]; !ok {
+		t.Fatalf("up omitted peerIps: %s", body)
+	}
+	if string(byName["up"]["peerIps"]) != `["100.64.0.9","fd7a:115c:a1e0::5"]` {
+		t.Fatalf("up peerIps %s", byName["up"]["peerIps"])
+	}
+	if string(byName["alone"]["peerIps"]) != "[]" {
+		t.Fatalf("alone peerIps %s", byName["alone"]["peerIps"])
+	}
+	if _, ok := byName["idle"]["peerIps"]; ok {
+		t.Fatalf("idle status queried no peers but has peerIps: %s", body)
+	}
+	for _, leaked := range []string{"nodekey", "tskey", "HostName", "login.example", "/a/"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("%q leaked: %s", leaked, body)
+		}
+	}
 }
 
 func TestStatusesListOnlyTailscaleOutbounds(t *testing.T) {
