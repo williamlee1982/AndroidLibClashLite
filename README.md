@@ -6,8 +6,8 @@ share one Go runtime and Core. The stable core version is pinned in `go.mod`.
 ## Build
 
 Requirements: Go (version from `go.mod`), JDK 21+, Python 3.10+, Android SDK
-platform 37 and NDK 28.2.13676358. Set `ANDROID_HOME`, `ANDROID_NDK_HOME` and
-`JAVA_HOME`. No Gradle or separate Kotlin compiler is required.
+platform 37.0, Build Tools 37.0.0 and NDK 28.2.13676358. Set `ANDROID_HOME`,
+`ANDROID_NDK_HOME` and `JAVA_HOME`. No Gradle or separate Kotlin compiler is required.
 
 ```sh
 python scripts/build_shared.py
@@ -121,6 +121,31 @@ restores environment settings, including `XDG_CONFIG_HOME`, `SAFE_PATHS`,
 protection callbacks. Checked source overlays adapt the pinned upstream module;
 they fail when expected source patterns change.
 
+## ROOT system DNS integration
+
+A running standalone CLI with effective UID 0 starts its own Java network
+observer; JNI and CLI tool commands (`-v`, `-h`, `-t`) do not. The observer uses
+ConnectivityManager / LinkProperties to supply physical-network DNS addresses.
+Mihomo performs the DNS exchanges for `system`, including `direct-nameserver`
+and `nameserver-policy`. The app and asteriskd do not relay DNS snapshots.
+
+The build compiles `native/systemdns/java` with javac and SDK D8, then embeds
+the single dex in `libgojni.so`. At startup the core verifies and reuses
+`<core-home>/system-dns-helper.dex`, or atomically replaces it from the embedded
+bytes. The file is root-owned, mode 0400, and retained at exit with any ART
+cache. No APK path or Gradle build is needed for the helper.
+
+An anonymous socketpair carries version 1 address snapshots directly to the
+core. Go's stdio/ExtraFiles mapping passes the child endpoint as fd 0 and fd 3;
+no named DNS socket is created. Helper failure, including loss of the
+connectivity service when system_server restarts, clears DNS and shuts the core
+down gracefully with status 70. JNI continues to use `notifyDnsChanged` from its
+host app.
+
+Build with `scripts/build_shared.py`; local AsteriskMETA builds can consume the
+AAR via `-PandroidLibClashLiteAar=/path/libclash.aar`. Host tests:
+`go test ./native/systemdns`.
+
 ## Auto-switch
 
 The core can replace a failed node selected in a manual `select` group with a
@@ -136,6 +161,7 @@ asterisk-auto-switch:
   preferred-filter: "(?i)HK"   # regexp2, like a group filter; optional
   failure-threshold: 1         # 1-10 consecutive failures
   expected-delay: 0            # ms; stop a scan at the first delay below it, 0 tests all
+  restore: false               # switch back once the original node recovers
   interval: 30                 # 10-3600 seconds between rounds
   url: https://www.gstatic.com/generate_204
   timeout: 5000                # 1000-30000 ms per test
@@ -160,10 +186,18 @@ through the group. A scan that finds no healthy member is retried after 1, 2, 4
 and then at most 8 failing rounds, so an offline device does not probe every node
 each interval.
 
+With `restore`, the node selected before the first automatic switch is probed
+every round while the group still holds the automatic replacement (a further
+automatic switch keeps the original). After 3 consecutive healthy probes it is
+selected again, with the same compare-and-set, cache update and connection
+close as a switch. Any other selection change abandons the restore. Pending
+restores survive hot reloads while `restore` stays enabled, and the group
+status reports them as `origin` and `originSuccesses`.
+
 `GET /asterisk/auto-switch` (authenticated like other Clash API routes) returns
 the active settings, their source (`config` or `control`), phase, next check
 time, progress, per-group status and up to 100 newest-first events (`failed`,
-`switched`, `no-replacement`, `selection-changed`). Events stay in memory only.
+`switched`, `no-replacement`, `selection-changed`, `restored`). Events stay in memory only.
 `PATCH /asterisk/auto-switch` with the same JSON settings applies immediately.
 The value survives hot profile reloads (`PUT /configs` or JNI load) and lasts
 until the process exits or JNI `reset()`; the YAML value applies again only in a
