@@ -133,10 +133,13 @@ require (
 	go4.org/netipx v0.0.0-20260823151212-3075585bcbeb // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
+	golang.org/x/mobile v0.0.0-20260908204917-8b95e45f8d3e // indirect
+	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
+	golang.org/x/tools v0.50.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
 
@@ -145,3 +148,5 @@ replace google.golang.org/protobuf => github.com/metacubex/protobuf-go v0.0.0-20
 replace github.com/metacubex/tailscale => github.com/williamlee1982/tailscale v0.0.0-20261019113455-50088b246af2
 
 replace github.com/metacubex/tailscale-wireguard-go => github.com/williamlee1982/tailscale-wireguard-go v0.0.0-20261019112510-402de60f4edb
+
+tool golang.org/x/mobile/cmd/gomobile
