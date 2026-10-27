@@ -97,14 +97,26 @@ func TestManualSelectionCancelsRestore(t *testing.T) {
 	ctx := context.Background()
 
 	c.round(ctx)
-	if err := selector.Set("C"); err != nil {
+	// B and C are both healthy and probes run at the default concurrency. The
+	// lower delay wins, and a sub-millisecond probe is reported as 1 ms, so
+	// the automatic replacement is whichever node finishes first. Selecting
+	// that same node again would not abandon the restore.
+	automatic := selector.Now()
+	manual := "B"
+	if automatic == "B" {
+		manual = "C"
+	}
+	if automatic != "B" && automatic != "C" {
+		t.Fatalf("selection = %s", automatic)
+	}
+	if err := selector.Set(manual); err != nil {
 		t.Fatal(err)
 	}
 	setHealthy(t, "A", true)
 	for range option.RestoreSuccesses {
 		c.round(ctx)
 	}
-	if selector.Now() != "C" || len(c.engine.restores) != 0 {
+	if selector.Now() != manual || len(c.engine.restores) != 0 {
 		t.Fatalf("selection = %s, restores = %+v", selector.Now(), c.engine.restores)
 	}
 }
